@@ -113,6 +113,27 @@ class AssemblerSegment:
         else:
             raise_unknown_address_size()
 
+    def add_symbol_export(self, name, size, typ):
+        """Add an exported symbol."""
+        nameOffset = "strtab_%s - strtab" % (name)
+        info = 16 + (1 if typ == 'FUNC' else 2)
+        if osarch_is_32_bit():
+            self.add_data(("st_name", 4, nameOffset))
+            self.add_data(("st_value", PlatformVar("addr"), name))
+            self.add_data(("st_size", PlatformVar("addr"), size))
+            self.add_data(("st_info", 1, info))
+            self.add_data(("st_other", 1, 0))
+            self.add_data(("st_shndx", 2, 1))
+        elif osarch_is_64_bit():
+            self.add_data(("st_name", 4, nameOffset))
+            self.add_data(("st_info", 1, info))
+            self.add_data(("st_other", 1, 0))
+            self.add_data(("st_shndx", 2, 1))
+            self.add_data(("st_value", PlatformVar("addr"), name))
+            self.add_data(("st_size", PlatformVar("addr"), size))
+        else:
+            raise_unknown_address_size()
+
     def clear_data(self):
         """Clear all data."""
         self.__data = []

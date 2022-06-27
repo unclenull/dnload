@@ -58,7 +58,8 @@ class Compiler(Linker):
         # Select flags based on compiler.
         if self.is_gcc():
             self.__compiler_flags += common_clang_gcc + ["-fno-enforce-eh-specs", "-fno-implicit-templates", "-fno-stack-protector", "-fno-use-cxa-atexit", "-fno-use-cxa-get-exception-ptr", "-fnothrow-opt"]
-            self.__compiler_flags_generate_asm += ["-fno-pic", "-fwhole-program"]
+            # self.__compiler_flags_generate_asm += ["-fno-pic", "-fwhole-program"]
+            self.__compiler_flags_generate_asm += ["-fwhole-program"]
             # Some flags are platform-specific.
             stack_boundary = int(PlatformVar("mpreferred-stack-boundary"))
             if 0 < stack_boundary:

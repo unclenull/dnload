@@ -73,7 +73,8 @@ g_assembler_ehdr = (
     ("e_ident[EI_OSABI], ELFOSABI_SYSV = 0, ELFOSABI_LINUX = 3, ELFOSABI_FREEBSD = 9", 1, PlatformVar("ei_osabi")),
     ("e_ident[EI_ABIVERSION], always 0", 1, 0),
     ("e_indent[EI_MAG10 to EI_MAG15], unused", 1, (0, 0, 0, 0, 0, 0, 0)),
-    ("e_type, ET_EXEC = 2", 2, 2),
+    # ("e_type, ET_EXEC = 2", 2, 2),
+    ("e_type, ET_DYN = 3", 2, 3),
     ("e_machine, EM_386 = 3, EM_ARM = 40, EM_X86_64 = 62, EM_AARCH64 = 183", 2, PlatformVar("e_machine")),
     ("e_version, EV_CURRENT = 1", 4, 1),
     ("e_entry, execution starting point", PlatformVar("addr"), PlatformVar("start")),
@@ -230,6 +231,8 @@ g_assembler_dynamic = (
     ("d_un", PlatformVar("addr"), 0, "dynamic_r_debug"),
     ("d_tag, DT_STRTAB = 5", PlatformVar("addr"), 5),
     ("d_un", PlatformVar("addr"), "strtab"),
+    ("d_tag, DT_STRSZ = 10", PlatformVar("addr"), 10),
+    ("d_un", PlatformVar("addr"), "strtab_end - strtab"),
     ("d_tag, DT_NULL = 0", PlatformVar("addr"), 0),
     ("d_un", PlatformVar("addr"), 0),
     )
@@ -664,6 +667,8 @@ def generate_binary_minimal(source_file, compiler, assembler, linker, objcopy, e
     segment_interp = AssemblerSegment(g_assembler_interp)
     segment_strtab = AssemblerSegment(g_assembler_strtab)
     segment_symtab = AssemblerSegment(g_assembler_symtab)
+    segment_symtab.add_symbol_empty()
+    symbol_count = 0
     # Dynamic and interp depend on address size.
     if osarch_is_32_bit():
         segment_phdr_dynamic = AssemblerSegment(g_assembler_phdr32_dynamic)
@@ -676,16 +681,11 @@ def generate_binary_minimal(source_file, compiler, assembler, linker, objcopy, e
     # There may be symbols necessary for addition.
     und_symbols = get_platform_und_symbols()
     if is_listing(und_symbols):
-        segment_symtab.add_symbol_empty()
+        symbol_count += len(und_symbols)
         for ii in und_symbols:
             segment_symtab.add_symbol_und(ii)
         for ii in reversed(und_symbols):
             segment_strtab.add_strtab(ii)
-        segment_dynamic.add_dt_symtab("symtab")
-        segment_dynamic.add_dt_hash("hash")
-        segment_hash.add_hash(und_symbols)
-    else:
-        segment_dynamic.add_dt_symtab(0)
     # Add libraries.
     for ii in reversed(libraries):
         for jj in listify(linker.get_library_name(ii)):
@@ -707,13 +707,20 @@ def generate_binary_minimal(source_file, compiler, assembler, linker, objcopy, e
     # Assemble content without headers to check for missing symbols.
     if asm.write(output_file_final_s, assembler):
         assembler.assemble(output_file_final_s, output_file_final_o)
-        extra_symbols = readelf_list_und_symbols(output_file_final_o)
+        (extra_symbols, exports) = readelf_list_und_symbols(output_file_final_o)
         output_file_extra = generate_temporary_filename(output_file + ".extra")
         additional_file = g_symbol_sources.compile_asm(compiler, assembler, extra_symbols, output_file_extra)
         # If additional code was needed, add it to our asm source.
         if additional_file:
             additional_asm = AssemblerFile(additional_file)
             asm.incorporate(additional_asm, re.sub(r'[\/\.]', '_', output_file + "_extra"))
+        # exports
+        if exports:
+            symbol_count += len(exports)
+            for (size, typ, name) in exports:
+                segment_symtab.add_symbol_export(name, size, typ)
+            for (size, typ, name) in reversed(exports):
+                segment_strtab.add_strtab(name)
     # Sort sections after generation, then crunch the source.
     asm.sort_sections(assembler)
     asm.crunch()
@@ -749,16 +756,21 @@ def generate_binary_minimal(source_file, compiler, assembler, linker, objcopy, e
         segments_mid += [segment_phdr_interp]
     # Last phdr and segments after the phdr array.
     segments_tail = [segment_phdr_dynamic, segment_dynamic]
-    if is_listing(und_symbols):
+    if symbol_count:
         segments_tail += [segment_symtab]
-    if is_listing(und_symbols):
+        segment_dynamic.add_dt_symtab("symtab")
+        segment_dynamic.add_dt_hash("hash")
+
         segments_tail += [segment_hash]
+        segment_hash.add_hash([0] * symbol_count)
+    else:
+        segment_dynamic.add_dt_symtab(0)
     if interp_needed:
         segments_tail += [segment_interp]
     segments_tail += [segment_strtab]
     # Merge all segments if allowed.
+    replace_platform_variable("phdr_count", phdr_count)
     if merge_allowed:
-        replace_platform_variable("phdr_count", phdr_count)
         replace_platform_variable("e_shentsize", 1)  # Merges with PT_LOAD.
         if osarch_is_64_bit():
             replace_platform_variable("phdr64_dynamic_p_align", 21)  # Merges with DT_DEBUG in dynamic section.
@@ -941,7 +953,7 @@ def readelf_get_info(op):
     else:
         raise RuntimeError("could not read first PT_LOAD from executable '%s'" % (op))
     # Entry point is locale-dependant so attempt to read it from the second line.
-    match = re.match(r'\s*\n.*EXEC.*\n*.*\s+(0x\S+)\n', so, re.MULTILINE)
+    match = re.match(r'\s*\n.*DYN.*\n*.*\s+(0x\S+)\n', so, re.MULTILINE)
     if match:
         ret["entry"] = int(match.group(1), 16) - ret["base"]
     else:
@@ -951,10 +963,9 @@ def readelf_get_info(op):
 def readelf_list_und_symbols(op):
     """List UND symbols found from a file."""
     (so, se) = run_command(["readelf", "--symbols", op])
-    match = re.findall(r'GLOBAL\s+DEFAULT\s+UND\s+(\S+)\s+', so, re.MULTILINE)
-    if match:
-        return match
-    return None
+    imports = re.findall(r'GLOBAL\s+DEFAULT\s+UND\s+(\S+)\s+', so, re.MULTILINE)
+    exports = re.findall(r'(\d+)\s+(FUNC|OBJECT)\s+GLOBAL\s+HIDDEN\s+\d+\s+(\S+)\s+', so, re.MULTILINE)
+    return (imports, exports)
 
 def readelf_probe(src, dst, size):
     """Probe ELF size, copy source to destination on equal size and return None, or return truncation size."""
@@ -1149,7 +1160,7 @@ def main():
     glsl_mode = args.glsl_mode
     include_directories += args.include_directory
     libraries = args.library
-    library_directories += args.library_directory
+    library_directories = args.library_directory + library_directories
     linker = args.linker
     nice_filedump = args.nice_filedump
     no_glesv2 = args.no_glesv2
