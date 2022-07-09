@@ -3,6 +3,7 @@ import re
 from dnload.assembler_section import AssemblerSection
 from dnload.assembler_section_alignment import is_assembler_section_alignment
 from dnload.assembler_section_bss import AssemblerSectionBss
+from dnload.platform_var import osarch_is_amd64
 from dnload.common import human_readable_bytes
 from dnload.common import is_verbose
 from dnload.common import listify
@@ -64,9 +65,9 @@ class AssemblerFile:
         for ii in self.__sections:
             ii.crunch()
 
-    def generate_fake_bss(self, assembler, und_symbols=None, elfling=None):
+    def generate_fake_bss(self, assembler, und_symbols=None, elfling=None, imports=None):
         """Remove local labels that would seem to generate .bss, make a fake .bss section."""
-        bss = AssemblerSectionBss()
+        bss = AssemblerSectionBss(imports)
         for ii in self.__sections:
             while True:
                 entry = ii.extract_bss(und_symbols)

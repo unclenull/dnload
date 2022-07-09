@@ -227,12 +227,8 @@ g_assembler_hash = (
 g_assembler_dynamic = (
     "dynamic",
     "PT_DYNAMIC",
-    ("d_tag, DT_DEBUG = 21", PlatformVar("addr"), 21),
-    ("d_un", PlatformVar("addr"), 0, "dynamic_r_debug"),
     ("d_tag, DT_STRTAB = 5", PlatformVar("addr"), 5),
     ("d_un", PlatformVar("addr"), "strtab"),
-    ("d_tag, DT_STRSZ = 10", PlatformVar("addr"), 10),
-    ("d_un", PlatformVar("addr"), "strtab_end - strtab"),
     ("d_tag, DT_NULL = 0", PlatformVar("addr"), 0),
     ("d_un", PlatformVar("addr"), 0),
     )
@@ -240,6 +236,11 @@ g_assembler_dynamic = (
 g_assembler_symtab = (
     "symtab",
     "DT_SYMTAB",
+    )
+
+g_assembler_rela = (
+    "rela",
+    "DT_RELA",
     )
 
 g_assembler_interp = (
@@ -655,7 +656,7 @@ def find_symbols(lst):
         ret += [find_symbol(ii)]
     return ret
 
-def generate_binary_minimal(source_file, compiler, assembler, linker, objcopy, elfling, libraries, output_file,
+def generate_binary_minimal(source_file, preprocessor, compiler, assembler, linker, objcopy, elfling, libraries, output_file,
                             additional_sources=[], interp_needed=False, merge_allowed=True):
     """Generate a binary using all possible tricks. Return whether or not reprocess is necessary."""
     output_file_s = generate_temporary_filename(output_file + ".S")
@@ -666,9 +667,11 @@ def generate_binary_minimal(source_file, compiler, assembler, linker, objcopy, e
     segment_hash = AssemblerSegment(g_assembler_hash)
     segment_interp = AssemblerSegment(g_assembler_interp)
     segment_strtab = AssemblerSegment(g_assembler_strtab)
+    segment_rela = AssemblerSegment(g_assembler_rela)
     segment_symtab = AssemblerSegment(g_assembler_symtab)
     segment_symtab.add_symbol_empty()
     symbol_count = 0
+    imports = None
     # Dynamic and interp depend on address size.
     if osarch_is_32_bit():
         segment_phdr_dynamic = AssemblerSegment(g_assembler_phdr32_dynamic)
@@ -707,13 +710,24 @@ def generate_binary_minimal(source_file, compiler, assembler, linker, objcopy, e
     # Assemble content without headers to check for missing symbols.
     if asm.write(output_file_final_s, assembler):
         assembler.assemble(output_file_final_s, output_file_final_o)
-        (extra_symbols, exports) = readelf_list_und_symbols(output_file_final_o)
-        output_file_extra = generate_temporary_filename(output_file + ".extra")
-        additional_file = g_symbol_sources.compile_asm(compiler, assembler, extra_symbols, output_file_extra)
-        # If additional code was needed, add it to our asm source.
-        if additional_file:
-            additional_asm = AssemblerFile(additional_file)
-            asm.incorporate(additional_asm, re.sub(r'[\/\.]', '_', output_file + "_extra"))
+        (imports, exports) = readelf_list_und_symbols(output_file_final_o)
+        if is_listing(imports):
+            segment_dynamic.add_dt_relas()
+            symbol_count += len(imports)
+
+            ix = 0
+            for ii in imports:
+                ix += 1
+                segment_symtab.add_symbol_und(ii)
+                segment_rela.add_rela(ii, ix)
+            for ii in reversed(imports):
+                segment_strtab.add_strtab(ii)
+        # output_file_extra = generate_temporary_filename(output_file + ".extra")
+        # additional_file = g_symbol_sources.compile_asm(compiler, assembler, extra_symbols, output_file_extra)
+        # # If additional code was needed, add it to our asm source.
+        # if additional_file:
+        #     additional_asm = AssemblerFile(additional_file)
+        #     asm.incorporate(additional_asm, re.sub(r'[\/\.]', '_', output_file + "_extra"))
         # exports
         if exports:
             symbol_count += len(exports)
@@ -727,7 +741,7 @@ def generate_binary_minimal(source_file, compiler, assembler, linker, objcopy, e
     # May be necessary to have two PT_LOAD headers as opposed to one.
     phdr_count = 2
     segment_phdr_load_bss = None
-    bss_section = asm.generate_fake_bss(assembler, und_symbols, elfling)
+    bss_section = asm.generate_fake_bss(assembler, und_symbols, elfling, imports)
     if 0 < bss_section.get_alignment():
         if osarch_is_32_bit():
             segment_phdr_load = AssemblerSegment(g_assembler_phdr32_load_double)
@@ -768,6 +782,10 @@ def generate_binary_minimal(source_file, compiler, assembler, linker, objcopy, e
     if interp_needed:
         segments_tail += [segment_interp]
     segments_tail += [segment_strtab]
+    if imports:
+        segments_tail.append(segment_rela)
+
+    set_program_start(0)
     # Merge all segments if allowed.
     replace_platform_variable("phdr_count", phdr_count)
     if merge_allowed:
@@ -786,6 +804,7 @@ def generate_binary_minimal(source_file, compiler, assembler, linker, objcopy, e
     bss_section.create_content(assembler, "end")
     # Write headers out first.
     fd = open(output_file_final_s, "w")
+
     header_sizes = 0
     for ii in segments:
         ii.write(fd, assembler)
@@ -797,13 +816,19 @@ def generate_binary_minimal(source_file, compiler, assembler, linker, objcopy, e
     fd.close()
     if is_verbose():
         print("Wrote assembler source: '%s'" % (output_file_final_s))
+
+    if imports:
+        s = preprocessor.preprocess(output_file_final_s)
+        fd = open(output_file_final_s, "w")
+        fd.write(s)
+        fd.close()
     # Assemble headers
     assembler.assemble(output_file_final_s, output_file_final_o)
     link_files = [output_file_final_o]
     # Link all generated files.
     output_file_ld = generate_temporary_filename(output_file + ".ld")
     output_file_unprocessed = generate_temporary_filename(output_file + ".unprocessed")
-    output_file_stripped = generate_temporary_filename(output_file + ".stripped")
+    # output_file_stripped = generate_temporary_filename(output_file + ".stripped")
     linker.generate_linker_script(output_file_ld, True)
     linker.set_linker_script(output_file_ld)
     # Some platforms cannot skip the extra objcopy step. Reason unknown.
@@ -811,9 +836,9 @@ def generate_binary_minimal(source_file, compiler, assembler, linker, objcopy, e
         objcopy = None
     linker.link_binary(objcopy, link_files, output_file_unprocessed)
     if bss_section.get_alignment():
-        readelf_zero(output_file_unprocessed, output_file_stripped)
+        readelf_zero(output_file_unprocessed, output_file)
     else:
-        readelf_truncate(output_file_unprocessed, output_file_stripped)
+        readelf_truncate(output_file_unprocessed, output_file)
 
 def generate_elfling(output_file, compiler, elfling, definition_ld):
     """Generate elfling stub."""
@@ -964,6 +989,7 @@ def readelf_list_und_symbols(op):
     """List UND symbols found from a file."""
     (so, se) = run_command(["readelf", "--symbols", op])
     imports = re.findall(r'GLOBAL\s+DEFAULT\s+UND\s+(\S+)\s+', so, re.MULTILINE)
+    imports = [el for el in imports if el != '_GLOBAL_OFFSET_TABLE_']
     exports = re.findall(r'(\d+)\s+(FUNC|OBJECT)\s+GLOBAL\s+HIDDEN\s+\d+\s+(\S+)\s+', so, re.MULTILINE)
     return (imports, exports)
 
@@ -985,7 +1011,7 @@ def readelf_truncate(src, dst):
     if truncate_size is None:
         return
     if is_verbose():
-        print("Truncating file size to PT_LOAD size: %u bytes" % (truncate_size))
+        print("Truncating file size to PT_LOAD size: %u bytes in %s" % (truncate_size, dst))
     rfd = open(src, "rb")
     wfd = open(dst, "wb")
     wfd.write(rfd.read(truncate_size))
@@ -999,7 +1025,7 @@ def readelf_zero(src, dst):
     if truncate_size is None:
         return
     if is_verbose():
-        print("Filling file with 0 after PT_LOAD size: %u bytes" % (truncate_size))
+        print("Filling file with 0 after PT_LOAD size: %u bytes in %s" % (truncate_size, dst))
     rfd = open(src, "rb")
     wfd = open(dst, "wb")
     wfd.write(rfd.read(truncate_size))
@@ -1079,7 +1105,7 @@ def main():
     default_strip_list = ["/usr/local/bin/strip", "strip"]
     definitions = []
     extra_assembler_flags = []
-    extra_compiler_flags = []
+    extra_compiler_flags = ['-fno-plt']
     extra_libraries = []
     extra_linker_flags = []
     include_directories = [PATH_VIDEOCORE + "/include", PATH_VIDEOCORE + "/include/interface/vcos/pthreads", PATH_VIDEOCORE + "/include/interface/vmcs_host/linux", "/usr/include/freetype2/", "/usr/include/opus", "/usr/include/SDL", "/usr/local/include", "/usr/local/include/freetype2/", "/usr/local/include/opus", "/usr/local/include/SDL"]
@@ -1228,33 +1254,33 @@ def main():
         if set_temporary_directory(found_tmpdir) and is_verbose():
             print("Using temporary directory '%s/'." % (found_tmpdir))
 
-    # GLES check (as opposed to plain desktop GL)
-    gles_reason = None
-    if not no_glesv2:
-        if os.path.exists(PATH_MALI):
-            extra_libraries += ["EGL"]
-            definitions += ["DNLOAD_MALI"]
-            gles_reason = "'%s' (Mali)" % (PATH_MALI)
-        if os.path.exists(PATH_VIDEOCORE):
-            definitions += ["DNLOAD_VIDEOCORE"]
-            gles_reason = "'%s' (VideoCore)" % (PATH_VIDEOCORE)
-            if 'armv7l' == g_osarch:
-                replace_osarch("armv6l", "Workaround (Raspberry Pi): ")
-    if gles_reason:
-        definitions += ["DNLOAD_GLESV2"]
-        replace_platform_variable("gl_library", "GLESv2")
-        if is_verbose():
-            print("Assuming OpenGL ES 2.0: %s" % (gles_reason))
+    # # GLES check (as opposed to plain desktop GL)
+    # gles_reason = None
+    # if not no_glesv2:
+    #     if os.path.exists(PATH_MALI):
+    #         extra_libraries += ["EGL"]
+    #         definitions += ["DNLOAD_MALI"]
+    #         gles_reason = "'%s' (Mali)" % (PATH_MALI)
+    #     if os.path.exists(PATH_VIDEOCORE):
+    #         definitions += ["DNLOAD_VIDEOCORE"]
+    #         gles_reason = "'%s' (VideoCore)" % (PATH_VIDEOCORE)
+    #         if 'armv7l' == g_osarch:
+    #             replace_osarch("armv6l", "Workaround (Raspberry Pi): ")
+    # if gles_reason:
+    #     definitions += ["DNLOAD_GLESV2"]
+    #     replace_platform_variable("gl_library", "GLESv2")
+    #     if is_verbose():
+    #         print("Assuming OpenGL ES 2.0: %s" % (gles_reason))
 
     # Find preprocessor.
     preprocessor_list = default_preprocessor_list
     if os.name == "nt":
         preprocessor_list = ["cl.exe"] + preprocessor_list
     preprocessor = Preprocessor(executable_find(preprocessor, preprocessor_list, "preprocessor"))
-    preprocessor.set_definitions(definitions)
-    preprocessor.set_include_dirs(include_directories)
+    # preprocessor.set_definitions(definitions)
+    # preprocessor.set_include_dirs(include_directories)
 
-    # Process GLSL source if given.
+    # # Process GLSL source if given.
     if source_files_glsl:
         if source_files or source_files_additional:
             raise RuntimeError("can not combine GLSL source files %s with other source files %s" % (str(source_files_glsl), str(source_files + source_files_additional)))
@@ -1338,16 +1364,16 @@ def main():
     if filedrop_interp:
         filedrop_interp = filedrop_interp.strip("\"")
 
-    # Symtab handling depends on selected operating system.
-    if args.symtab_mode == "auto":
-        if osname_is_freebsd():
-            args.symtab_mode = "safe"
-        else:
-            args.symtab_mode = "unsafe"
-        if is_verbose():
-            print("Autodetected symtab mode: '%s'" % (args.symtab_mode))
-    if args.symtab_mode == "safe":
-        definitions += ["DNLOAD_SAFE_SYMTAB_HANDLING"]
+    # # Symtab handling depends on selected operating system.
+    # if args.symtab_mode == "auto":
+    #     if osname_is_freebsd():
+    #         args.symtab_mode = "safe"
+    #     else:
+    #         args.symtab_mode = "unsafe"
+    #     if is_verbose():
+    #         print("Autodetected symtab mode: '%s'" % (args.symtab_mode))
+    # if args.symtab_mode == "safe":
+    #     definitions += ["DNLOAD_SAFE_SYMTAB_HANDLING"]
 
     # Header merging depends on target platform.
     if args.merge_headers == "auto":
@@ -1362,43 +1388,43 @@ def main():
     else:
         args.merge_headers = False
 
-    # Selected rand() implementation depends on target platform.
-    if (not args.rand) or (args.rand == "auto"):
-        if osname_is_linux():
-            args.rand = "gnu"
-        else:
-            args.rand = "bsd"
+    # # Selected rand() implementation depends on target platform.
+    # if (not args.rand) or (args.rand == "auto"):
+    #     if osname_is_linux():
+    #         args.rand = "gnu"
+    #     else:
+    #         args.rand = "bsd"
 
-    if compilation_mode not in ("vanilla", "dlfcn", "hash", "maximum"):
-        raise RuntimeError("unknown method '%s'" % (compilation_mode))
-    elif "hash" == compilation_mode:
-        definitions += ["DNLOAD_NO_FIXED_R_DEBUG_ADDRESS"]
+    # if compilation_mode not in ("vanilla", "dlfcn", "hash", "maximum"):
+    #     raise RuntimeError("unknown method '%s'" % (compilation_mode))
+    # elif "hash" == compilation_mode:
+    #     definitions += ["DNLOAD_NO_FIXED_R_DEBUG_ADDRESS"]
 
-    # Select hash function.
-    if compilation_mode in ("hash", "maximum"):
-        if args.hash_function == "auto":
-            args.hash_function = "sdbm"
-            if is_verbose():
-                print("Autodetected hash function: '%s'" % (args.hash_function))
-        if args.hash_function == "crc32":
-            if osarch_is_ia32() or osarch_is_amd64():
-                extra_compiler_flags += ["-msse4.2"]
+    # # Select hash function.
+    # if compilation_mode in ("hash", "maximum"):
+    #     if args.hash_function == "auto":
+    #         args.hash_function = "sdbm"
+    #         if is_verbose():
+    #             print("Autodetected hash function: '%s'" % (args.hash_function))
+    #     if args.hash_function == "crc32":
+    #         if osarch_is_ia32() or osarch_is_amd64():
+    #             extra_compiler_flags += ["-msse4.2"]
 
-    target_path, target_file = os.path.split(os.path.normpath(target))
-    if target_path:
-        if is_verbose():
-            print("Using explicit target header file '%s'." % (target))
-    else:
-        target_file = locate(target_search_path, target)
-        if target_file:
-            target = os.path.normpath(target_file)
-            target_path, target_file = os.path.split(target)
-            if is_verbose():
-                print("Found header file: '%s'" % (target))
-        else:
-            raise RuntimeError("no information where to put header file '%s' - not found in path(s) %s" % (target, str(target_search_path)))
-    # Erase contents of the header after it has been found.
-    touch(target)
+    # target_path, target_file = os.path.split(os.path.normpath(target))
+    # if target_path:
+    #     if is_verbose():
+    #         print("Using explicit target header file '%s'." % (target))
+    # else:
+    #     target_file = locate(target_search_path, target)
+    #     if target_file:
+    #         target = os.path.normpath(target_file)
+    #         target_path, target_file = os.path.split(target)
+    #         if is_verbose():
+    #             print("Found header file: '%s'" % (target))
+    #     else:
+    #         raise RuntimeError("no information where to put header file '%s' - not found in path(s) %s" % (target, str(target_search_path)))
+    # # Erase contents of the header after it has been found.
+    # touch(target)
 
     # Find compiler and linker if necessary.
     # dlfcn mode needs library directories even if only preprocessing.
@@ -1420,103 +1446,103 @@ def main():
             linker.addExtraFlags(extra_linker_flags)
         linker.set_library_directories(library_directories)
 
-    # Clear target header before parsing to avoid problems.
-    fd = open(target, "w")
-    fd.write("\n")
-    fd.close()
-    if is_verbose():
-        print("Analyzing source files: %s" % (str(source_files)))
-    # Prepare GLSL headers before preprocessing.
-    for ii in source_files:
-        generate_glsl_extract(ii, preprocessor, definition_ld, glsl_mode, glsl_inlines, glsl_renames, glsl_simplifys)
-    # Search symbols from source files.
-    symbols = set()
-    for ii in source_files:
-        source = preprocessor.preprocess(ii)
-        source_symbols = extract_symbol_names(source, symbol_prefix)
-        symbols = symbols.union(source_symbols)
-    symbols = find_symbols(symbols)
-    if "dlfcn" == compilation_mode:
-        symbols = sorted(symbols)
-    elif "maximum" == compilation_mode:
-        sortable_symbols = []
-        for ii in symbols:
-            sortable_symbols += [(ii.get_hash(args.hash_function), ii)]
-        symbols = []
-        for ii in sorted(sortable_symbols):
-            symbols += [ii[1]]
-    # Some libraries cannot co-exist, but have some symbols with identical names.
-    symbols = replace_conflicting_library(symbols, "SDL", "SDL2")
-    # Filter real symbols (as separate from implicit).
-    real_symbols = list(filter(lambda x: not x.is_verbatim(), symbols))
-    if is_verbose():
-        symbol_strings = list(map(lambda x: str(x), symbols))
-        print("%i symbols found: %s" % (len(symbols), str(symbol_strings)))
-        verbatim_symbols = list(set(symbols) - set(real_symbols))
-        if verbatim_symbols and output_file:
-            verbatim_symbol_strings = []
-            for ii in verbatim_symbols:
-                verbatim_symbol_strings += [str(ii)]
-            print("Not loading verbatim symbols: %s" % (str(verbatim_symbol_strings)))
-    # Header includes.
-    subst = {}
-    if symbols_has_library(symbols, "c"):
-        subst["INCLUDE_C"] = g_template_include_c.format()
-    if symbols_has_library(symbols, "fftw3"):
-        subst["INCLUDE_FFTW"] = g_template_include_fftw.format()
-    if symbols_has_library(symbols, "freetype"):
-        subst["INCLUDE_FREETYPE"] = g_template_include_freetype.format()
-    if symbols_has_library(symbols, "m"):
-        subst["INCLUDE_MATH"] = g_template_include_math.format()
-    if symbols_has_library(symbols, "ncurses"):
-        subst["INCLUDE_NCURSES"] = g_template_include_ncurses.format()
-    if symbols_has_library(symbols, ("GL", "GLESv2")):
-        subst["INCLUDE_OPENGL"] = g_template_include_opengl.format({"DEFINITION_LD": definition_ld})
-    if symbols_has_library(symbols, "opus"):
-        subst["INCLUDE_OPUS"] = g_template_include_opus.format()
-    if symbols_has_library(symbols, "opusfile"):
-        subst["INCLUDE_OPUSFILE"] = g_template_include_opusfile.format()
-    if symbols_has_library(symbols, "png"):
-        subst["INCLUDE_PNG"] = g_template_include_png.format()
-    if symbols_has_library(symbols, ("SDL", "SDL2")):
-        subst["INCLUDE_SDL"] = g_template_include_sdl.format()
-    if symbols_has_library(symbols, "sndfile"):
-        subst["INCLUDE_SNDFILE"] = g_template_include_sndfile.format()
-    # Workarounds for specific symbol implementations - must be done before symbol definitions.
-    if symbols_has_symbol(symbols, "rand"):
-        subst["INCLUDE_RAND"] = generate_include_rand(args.rand, target_search_path, definition_ld)
-    # Symbol definitions.
-    symbol_definitions_direct = generate_symbol_definitions_direct(symbols, symbol_prefix)
-    subst["SYMBOL_DEFINITIONS_DIRECT"] = symbol_definitions_direct
-    if "vanilla" == compilation_mode:
-        subst["SYMBOL_DEFINITIONS_TABLE"] = symbol_definitions_direct
-    else:
-        symbol_definitions_table = generate_symbol_definitions_table(symbols, symbol_prefix)
-        symbol_table = generate_symbol_table(compilation_mode, real_symbols, args.hash_function)
-        subst["SYMBOL_DEFINITIONS_TABLE"] = symbol_definitions_table
-        subst["SYMBOL_TABLE"] = symbol_table
-    # Loader and UND symbols.
-    if "vanilla" == compilation_mode:
-        subst["LOADER"] = generate_loader_vanilla()
-    elif "dlfcn" == compilation_mode:
-        subst["LOADER"] = generate_loader_dlfcn(real_symbols, linker)
-    else:
-        subst["LOADER"] = generate_loader_hash(real_symbols, args.hash_function)
-    if "maximum" != compilation_mode:
-        subst["UND_SYMBOLS"] = g_template_und_symbols.format()
-    # Add remaining simple substitutions and generate file contents.
-    subst["DEFINITION_LD"] = definition_ld
-    subst["FILENAME"] = program_name
-    file_contents = g_template_header.format(subst)
-    # Write target file.
-    fd = open(target, "w")
-    fd.write(file_contents)
-    fd.close()
-    if is_verbose():
-        print("Wrote header file: '%s'" % (target))
-    # Early exit if preprocess only.
-    if args.preprocess_only:
-        sys.exit(0)
+    # # Clear target header before parsing to avoid problems.
+    # fd = open(target, "w")
+    # fd.write("\n")
+    # fd.close()
+    # if is_verbose():
+    #     print("Analyzing source files: %s" % (str(source_files)))
+    # # Prepare GLSL headers before preprocessing.
+    # for ii in source_files:
+    #     generate_glsl_extract(ii, preprocessor, definition_ld, glsl_mode, glsl_inlines, glsl_renames, glsl_simplifys)
+    # # Search symbols from source files.
+    # symbols = set()
+    # for ii in source_files:
+    #     source = preprocessor.preprocess(ii)
+    #     source_symbols = extract_symbol_names(source, symbol_prefix)
+    #     symbols = symbols.union(source_symbols)
+    # symbols = find_symbols(symbols)
+    # if "dlfcn" == compilation_mode:
+    #     symbols = sorted(symbols)
+    # elif "maximum" == compilation_mode:
+    #     sortable_symbols = []
+    #     for ii in symbols:
+    #         sortable_symbols += [(ii.get_hash(args.hash_function), ii)]
+    #     symbols = []
+    #     for ii in sorted(sortable_symbols):
+    #         symbols += [ii[1]]
+    # # Some libraries cannot co-exist, but have some symbols with identical names.
+    # symbols = replace_conflicting_library(symbols, "SDL", "SDL2")
+    # # Filter real symbols (as separate from implicit).
+    # real_symbols = list(filter(lambda x: not x.is_verbatim(), symbols))
+    # if is_verbose():
+    #     symbol_strings = list(map(lambda x: str(x), symbols))
+    #     print("%i symbols found: %s" % (len(symbols), str(symbol_strings)))
+    #     verbatim_symbols = list(set(symbols) - set(real_symbols))
+    #     if verbatim_symbols and output_file:
+    #         verbatim_symbol_strings = []
+    #         for ii in verbatim_symbols:
+    #             verbatim_symbol_strings += [str(ii)]
+    #         print("Not loading verbatim symbols: %s" % (str(verbatim_symbol_strings)))
+    # # Header includes.
+    # subst = {}
+    # if symbols_has_library(symbols, "c"):
+    #     subst["INCLUDE_C"] = g_template_include_c.format()
+    # if symbols_has_library(symbols, "fftw3"):
+    #     subst["INCLUDE_FFTW"] = g_template_include_fftw.format()
+    # if symbols_has_library(symbols, "freetype"):
+    #     subst["INCLUDE_FREETYPE"] = g_template_include_freetype.format()
+    # if symbols_has_library(symbols, "m"):
+    #     subst["INCLUDE_MATH"] = g_template_include_math.format()
+    # if symbols_has_library(symbols, "ncurses"):
+    #     subst["INCLUDE_NCURSES"] = g_template_include_ncurses.format()
+    # if symbols_has_library(symbols, ("GL", "GLESv2")):
+    #     subst["INCLUDE_OPENGL"] = g_template_include_opengl.format({"DEFINITION_LD": definition_ld})
+    # if symbols_has_library(symbols, "opus"):
+    #     subst["INCLUDE_OPUS"] = g_template_include_opus.format()
+    # if symbols_has_library(symbols, "opusfile"):
+    #     subst["INCLUDE_OPUSFILE"] = g_template_include_opusfile.format()
+    # if symbols_has_library(symbols, "png"):
+    #     subst["INCLUDE_PNG"] = g_template_include_png.format()
+    # if symbols_has_library(symbols, ("SDL", "SDL2")):
+    #     subst["INCLUDE_SDL"] = g_template_include_sdl.format()
+    # if symbols_has_library(symbols, "sndfile"):
+    #     subst["INCLUDE_SNDFILE"] = g_template_include_sndfile.format()
+    # # Workarounds for specific symbol implementations - must be done before symbol definitions.
+    # if symbols_has_symbol(symbols, "rand"):
+    #     subst["INCLUDE_RAND"] = generate_include_rand(args.rand, target_search_path, definition_ld)
+    # # Symbol definitions.
+    # symbol_definitions_direct = generate_symbol_definitions_direct(symbols, symbol_prefix)
+    # subst["SYMBOL_DEFINITIONS_DIRECT"] = symbol_definitions_direct
+    # if "vanilla" == compilation_mode:
+    #     subst["SYMBOL_DEFINITIONS_TABLE"] = symbol_definitions_direct
+    # else:
+    #     symbol_definitions_table = generate_symbol_definitions_table(symbols, symbol_prefix)
+    #     symbol_table = generate_symbol_table(compilation_mode, real_symbols, args.hash_function)
+    #     subst["SYMBOL_DEFINITIONS_TABLE"] = symbol_definitions_table
+    #     subst["SYMBOL_TABLE"] = symbol_table
+    # # Loader and UND symbols.
+    # if "vanilla" == compilation_mode:
+    #     subst["LOADER"] = generate_loader_vanilla()
+    # elif "dlfcn" == compilation_mode:
+    #     subst["LOADER"] = generate_loader_dlfcn(real_symbols, linker)
+    # else:
+    #     subst["LOADER"] = generate_loader_hash(real_symbols, args.hash_function)
+    # if "maximum" != compilation_mode:
+    #     subst["UND_SYMBOLS"] = g_template_und_symbols.format()
+    # # Add remaining simple substitutions and generate file contents.
+    # subst["DEFINITION_LD"] = definition_ld
+    # subst["FILENAME"] = program_name
+    # file_contents = g_template_header.format(subst)
+    # # Write target file.
+    # fd = open(target, "w")
+    # fd.write(file_contents)
+    # fd.close()
+    # if is_verbose():
+    #     print("Wrote header file: '%s'" % (target))
+    # # Early exit if preprocess only.
+    # if args.preprocess_only:
+    #     sys.exit(0)
     # Not only preprocessing, ensure the sources are ok.
     if 1 < len(source_files):
         raise RuntimeError("only one source file supported when generating output file")
@@ -1533,19 +1559,19 @@ def main():
         assembler.addExtraFlags(extra_assembler_flags)
 
     # Determine abstraction layer if it's not been set.
-    if not abstraction_layer:
-        if symbols_has_library(symbols, "SDL"):
-            abstraction_layer += ["sdl1"]
-        if symbols_has_library(symbols, "SDL2"):
-            abstraction_layer += ["sdl2"]
-    if 1 < len(abstraction_layer):
-        raise RuntimeError("conflicting abstraction layers detected: %s" % (str(abstraction_layer)))
-    if "sdl2" in abstraction_layer:
-        (sdl_stdout, sdl_stderr) = run_command(["sdl2-config", "--cflags"])
-        compiler.add_extra_compiler_flags(sdl_stdout.split())
-    elif "sdl1" in abstraction_layer:
-        (sdl_stdout, sdl_stderr) = run_command(["sdl-config", "--cflags"])
-        compiler.add_extra_compiler_flags(sdl_stdout.split())
+    # if not abstraction_layer:
+    #     if symbols_has_library(symbols, "SDL"):
+    #         abstraction_layer += ["sdl1"]
+    #     if symbols_has_library(symbols, "SDL2"):
+    #         abstraction_layer += ["sdl2"]
+    # if 1 < len(abstraction_layer):
+    #     raise RuntimeError("conflicting abstraction layers detected: %s" % (str(abstraction_layer)))
+    # if "sdl2" in abstraction_layer:
+    #     (sdl_stdout, sdl_stderr) = run_command(["sdl2-config", "--cflags"])
+    #     compiler.add_extra_compiler_flags(sdl_stdout.split())
+    # elif "sdl1" in abstraction_layer:
+    #     (sdl_stdout, sdl_stderr) = run_command(["sdl-config", "--cflags"])
+    #     compiler.add_extra_compiler_flags(sdl_stdout.split())
 
     # Determine output file.
     if output_file:
@@ -1558,7 +1584,7 @@ def main():
             print("Using output file '%s' after source file '%s'." % (output_file, source_file))
 
     source_file = source_files[0]
-    libraries = collect_libraries(libraries, extra_libraries, real_symbols, compilation_mode)
+    # libraries = collect_libraries(libraries, extra_libraries, real_symbols, compilation_mode)
     compiler.generate_compiler_flags()
     compiler.generate_linker_flags()
     compiler.set_libraries(libraries)
@@ -1569,7 +1595,7 @@ def main():
     linker.set_rpath_directories(rpath)
     if "maximum" == compilation_mode:
         objcopy = executable_find(objcopy, default_objcopy_list, "objcopy")
-        generate_binary_minimal(source_file, compiler, assembler, linker, objcopy, elfling, libraries, output_file,
+        generate_binary_minimal(source_file, preprocessor, compiler, assembler, linker, objcopy, elfling, libraries, output_file,
                                 source_files_additional, interp_needed, args.merge_headers)
         # Now have complete binary, may need to reprocess.
         if elfling:
@@ -1604,7 +1630,7 @@ def main():
         strip = executable_find(strip, default_strip_list, "strip")
         shutil.copy(output_file_unprocessed, output_file_stripped)
         run_command([strip, "-K", ".bss", "-K", ".text", "-K", ".data", "-R", ".comment", "-R", ".eh_frame", "-R", ".eh_frame_hdr", "-R", ".fini", "-R", ".gnu.hash", "-R", ".gnu.version", "-R", ".jcr", "-R", ".note", "-R", ".note.ABI-tag", "-R", ".note.tag", output_file_stripped])
-    compress_file(compression, filedrop_interp, nice_filedump, output_file_stripped, output_file)
+    # compress_file(compression, filedrop_interp, nice_filedump, output_file_stripped, output_file)
 
     return 0
 

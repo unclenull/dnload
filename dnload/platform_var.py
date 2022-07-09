@@ -100,7 +100,8 @@ g_platform_variables = {
     "e_shstrndx": {"default": 0},
     "ei_class": {"32-bit": 1, "64-bit": 2},
     "ei_osabi": {"FreeBSD": 9, "Linux": 3},  # SYSV: 0
-    "entry": {"64-bit": 0x400000, "arm32l": 0x10000, "ia32": 0x2000000},  # ia32: 0x8048000
+    # "entry": {"64-bit": 0x400000, "arm32l": 0x10000, "ia32": 0x2000000},  # ia32: 0x8048000
+    "entry": {"64-bit": 0, "arm32l": 0x10000, "ia32": 0x2000000},  # ia32: 0x8048000
     "function_ceilf": {"default": None, "arm32l": "ceilf"},
     "function_floorf": {"default": None, "arm32l": "floorf"},
     "function_rand": {"default": None},
@@ -116,6 +117,7 @@ g_platform_variables = {
     "phdr64_dynamic_p_align": {"default": 0},
     "shelldrop_header": {"Arch": "!/bin/sh\n", "default": ""},
     "shelldrop_tail": {"Arch": "sed 1,2d", "default": "sed 1d"},
+    # "start": {"default": "_start"},
     "start": {"default": "_start"},
     }
 

@@ -64,6 +64,25 @@ class AssemblerSegment:
         d_un = AssemblerVariable(("d_un", PlatformVar("addr"), op))
         self.add_dt_element(d_tag, d_un)
 
+    def add_dt_relas(self):
+        """Add DT_RELA,DT_RELASZ,DT_RELAENT"""
+        d_tag = AssemblerVariable(("d_tag, DT_RELA = 7", PlatformVar("addr"), 7))
+        d_un = AssemblerVariable(("d_un", PlatformVar("addr"), 'rela'))
+        self.add_dt_element(d_tag, d_un)
+        d_tag = AssemblerVariable(("d_tag, DT_RELASZ = 8", PlatformVar("addr"), 8))
+        d_un = AssemblerVariable(("d_un", PlatformVar("addr"), 'rela_end - rela'))
+        self.add_dt_element(d_tag, d_un)
+        d_tag = AssemblerVariable(("d_tag, DT_RELAENT = 9", PlatformVar("addr"), 9))
+        d_un = AssemblerVariable(("d_un", PlatformVar("addr"), PlatformVar("addr").get() * 3))
+        self.add_dt_element(d_tag, d_un)
+
+    def add_rela(self, name, ix):
+        """Add a relocation entry Elf32_Rela/Elf64_Rela."""
+        # self.add_data(("r_offset", PlatformVar("addr"), "got_%s" % (name)))
+        self.add_data(("r_offset", PlatformVar("addr"), name))
+        self.add_data(("r_info", PlatformVar("addr"), (ix << int(PlatformVar("addr").get()/2*8)) + 6)) # R_X86_64_GLOB_DAT
+        self.add_data(("r_addend", PlatformVar("addr"), 0))
+
     def add_hash(self, lst):
         """Generate a minimal DT_HASH based on symbol listing."""
         self.__data = []
@@ -95,20 +114,19 @@ class AssemblerSegment:
 
     def add_symbol_und(self, name):
         """Add a symbol to satisfy UND from external source."""
-        label_name = "symtab_" + name
         if osarch_is_32_bit():
             self.add_data(("st_name", 4, "strtab_%s - strtab" % (name)))
-            self.add_data(("st_value", PlatformVar("addr"), label_name, label_name))
+            self.add_data(("st_value", PlatformVar("addr"), 0))
             self.add_data(("st_size", PlatformVar("addr"), PlatformVar("addr")))
-            self.add_data(("st_info", 1, 17))
+            self.add_data(("st_info", 1, 0x11))
             self.add_data(("st_other", 1, 0))
-            self.add_data(("st_shndx", 2, 1))
+            self.add_data(("st_shndx", 2, 0))
         elif osarch_is_64_bit():
             self.add_data(("st_name", 4, "strtab_%s - strtab" % (name)))
-            self.add_data(("st_info", 1, 17))
+            self.add_data(("st_info", 1, 0x10))
             self.add_data(("st_other", 1, 0))
-            self.add_data(("st_shndx", 2, 1))
-            self.add_data(("st_value", PlatformVar("addr"), label_name, label_name))
+            self.add_data(("st_shndx", 2, 0))
+            self.add_data(("st_value", PlatformVar("addr"), 0))
             self.add_data(("st_size", PlatformVar("addr"), PlatformVar("addr")))
         else:
             raise_unknown_address_size()
@@ -116,7 +134,7 @@ class AssemblerSegment:
     def add_symbol_export(self, name, size, typ):
         """Add an exported symbol."""
         nameOffset = "strtab_%s - strtab" % (name)
-        info = 16 + (1 if typ == 'FUNC' else 2)
+        info = 16 + (2 if typ == 'FUNC' else 1)
         if osarch_is_32_bit():
             self.add_data(("st_name", 4, nameOffset))
             self.add_data(("st_value", PlatformVar("addr"), name))

@@ -8,10 +8,11 @@ from dnload.platform_var import PlatformVar
 class AssemblerSectionBss(AssemblerSection):
     """.bss section to be appended to the end of assembler source files."""
 
-    def __init__(self):
+    def __init__(self, imports=None):
         """Constructor."""
         AssemblerSection.__init__(self, "bss")
         self.__elements = []
+        self.__imports = imports
         self.__size = 0
         self.__und_size = 0
 
@@ -29,14 +30,27 @@ class AssemblerSectionBss(AssemblerSection):
     def create_content(self, assembler, prepend_label=None):
         """Generate assembler content."""
         self.clear_content()
+        addr_size = int(PlatformVar("addr"))
         if prepend_label:
             self.add_content(assembler.format_label(prepend_label))
         if 0 < self.__size:
-            self.add_content(assembler.format_align(int(PlatformVar("addr"))))
+            self.add_content(assembler.format_align(addr_size))
             self.add_content(assembler.format_label("aligned_end"))
         if 0 < self.get_alignment():
             self.add_content(assembler.format_align(self.get_alignment()))
-        self.add_content(assembler.format_label("bss_start"))
+
+        if self.__imports:
+            self.add_content(assembler.format_equ('GOTPCREL', "aligned_end" if 0 < self.__size else 'end'))
+            ix = 0
+            for imp in self.__imports:
+                # self.add_content(assembler.format_equ(f'got_{imp}', "GOTPCREL + %i" % (ix)))
+                self.add_content(assembler.format_equ(imp, "GOTPCREL + %i" % (ix)))
+                ix += addr_size
+
+            self.add_content(assembler.format_equ("got_end", "GOTPCREL + %i" % (ix)))
+            self.add_content(assembler.format_equ('bss_start', 'got_end'))
+        else:
+            self.add_content(assembler.format_label("bss_start"))
         cumulative = 0
         for ii in self.__elements:
             self.add_content(assembler.format_equ(ii.get_name(), "bss_start + %i" % (cumulative)))
